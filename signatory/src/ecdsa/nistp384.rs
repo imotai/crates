@@ -8,7 +8,7 @@ use crate::{
 };
 use alloc::boxed::Box;
 use core::fmt;
-use pkcs8::{DecodePrivateKey, EncodePrivateKey};
+use pkcs8::EncodePrivateKey;
 use signature::Signer;
 
 /// ECDSA/P-384 key ring.
@@ -64,7 +64,7 @@ impl SigningKey {
 
     /// Initialize from a raw scalar value (big endian).
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let signing_key = p384::ecdsa::SigningKey::from_bytes(bytes)?;
+        let signing_key = p384::ecdsa::SigningKey::from_slice(bytes)?;
         Ok(Self::new(Box::new(signing_key)))
     }
 
@@ -73,8 +73,6 @@ impl SigningKey {
         self.inner.verifying_key()
     }
 }
-
-impl DecodePrivateKey for SigningKey {}
 
 impl TryFrom<pkcs8::PrivateKeyInfo<'_>> for SigningKey {
     type Error = pkcs8::Error;
@@ -93,7 +91,6 @@ impl TryFrom<&[u8]> for SigningKey {
 }
 
 #[cfg(feature = "std")]
-#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 impl GeneratePkcs8 for SigningKey {
     /// Randomly generate a new PKCS#8 private key.
     fn generate_pkcs8() -> pkcs8::SecretDocument {

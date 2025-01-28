@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(feature = "bip39")]
-use {super::seed::Seed, hmac::Hmac, sha2::Sha512};
+use {super::seed::Seed, sha2::Sha512};
 
 /// Number of PBKDF2 rounds to perform when deriving the seed
 #[cfg(feature = "bip39")]
@@ -44,7 +44,7 @@ impl Phrase {
     /// Create a new BIP39 mnemonic phrase from the given entropy
     pub fn from_entropy(entropy: Entropy, language: Language) -> Self {
         let wordlist = language.wordlist();
-        let checksum_byte = Sha256::digest(entropy.as_ref()).as_slice()[0];
+        let checksum_byte = Sha256::digest(entropy.as_slice()).as_slice()[0];
 
         // First, create a byte iterator for the given entropy and the first byte of the
         // hash of the entropy that will serve as the checksum (up to 8 bits for biggest
@@ -131,11 +131,10 @@ impl Phrase {
 
     /// Convert this mnemonic phrase into the BIP39 seed value.
     #[cfg(feature = "bip39")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "bip39")))]
     pub fn to_seed(&self, password: &str) -> Seed {
         let salt = Zeroizing::new(format!("mnemonic{}", password));
         let mut seed = [0u8; Seed::SIZE];
-        pbkdf2::pbkdf2::<Hmac<Sha512>>(
+        pbkdf2::pbkdf2_hmac::<Sha512>(
             self.phrase.as_bytes(),
             salt.as_bytes(),
             PBKDF2_ROUNDS,

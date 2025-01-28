@@ -1,18 +1,16 @@
 //! Extended public keys
 
 use crate::{
-    ChildNumber, Error, ExtendedKey, ExtendedKeyAttrs, ExtendedPrivateKey, HmacSha512,
-    KeyFingerprint, Prefix, PrivateKey, PublicKey, PublicKeyBytes, Result, KEY_SIZE,
+    ChildNumber, Error, ExtendedKey, ExtendedKeyAttrs, ExtendedPrivateKey, KeyFingerprint, Prefix,
+    PrivateKey, PublicKey, PublicKeyBytes, Result,
 };
 use core::str::FromStr;
-use hmac::Mac;
 
 #[cfg(feature = "alloc")]
 use alloc::string::{String, ToString};
 
 /// Extended public secp256k1 ECDSA verification key.
 #[cfg(feature = "secp256k1")]
-#[cfg_attr(docsrs, doc(cfg(feature = "secp256k1")))]
 pub type XPub = ExtendedPublicKey<k256::ecdsa::VerifyingKey>;
 
 /// Extended public keys derived using BIP32.
@@ -33,6 +31,11 @@ impl<K> ExtendedPublicKey<K>
 where
     K: PublicKey,
 {
+    /// Create a new extended public key from a public key and attributes.
+    pub fn new(public_key: K, attrs: ExtendedKeyAttrs) -> Self {
+        Self { public_key, attrs }
+    }
+
     /// Obtain the non-extended public key value `K`.
     pub fn public_key(&self) -> &K {
         &self.public_key
@@ -51,27 +54,26 @@ where
 
     /// Derive a child key for a particular [`ChildNumber`].
     pub fn derive_child(&self, child_number: ChildNumber) -> Result<Self> {
-        if child_number.is_hardened() {
-            // Cannot derive child public keys for hardened `ChildNumber`s
-            return Err(Error::ChildNumber);
-        }
-
         let depth = self.attrs.depth.checked_add(1).ok_or(Error::Depth)?;
+        let (tweak, chain_code) = self
+            .public_key
+            .derive_tweak(&self.attrs.chain_code, child_number)?;
 
-        let mut hmac =
-            HmacSha512::new_from_slice(&self.attrs.chain_code).map_err(|_| Error::Crypto)?;
-
-        hmac.update(&self.public_key.to_bytes());
-        hmac.update(&child_number.to_bytes());
-
-        let result = hmac.finalize().into_bytes();
-        let (child_key, chain_code) = result.split_at(KEY_SIZE);
-        let public_key = self.public_key.derive_child(child_key.try_into()?)?;
+        // We should technically loop here if the tweak is zero or overflows
+        // the order of the underlying elliptic curve group, incrementing the
+        // index, however per "Child key derivation (CKD) functions":
+        // https://github.com/bitcoin/bips/blob/master/bip-0032.mediawiki#child-key-derivation-ckd-functions
+        //
+        // > "Note: this has probability lower than 1 in 2^127."
+        //
+        // ...so instead, we simply return an error if this were ever to happen,
+        // as the chances of it happening are vanishingly small.
+        let public_key = self.public_key.derive_child(tweak)?;
 
         let attrs = ExtendedKeyAttrs {
             parent_fingerprint: self.public_key.fingerprint(),
             child_number,
-            chain_code: chain_code.try_into()?,
+            chain_code,
             depth,
         };
 
@@ -94,7 +96,6 @@ where
 
     /// Serialize this key as a `String`.
     #[cfg(feature = "alloc")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
     pub fn to_string(&self, prefix: Prefix) -> String {
         self.to_extended_key(prefix).to_string()
     }
@@ -129,6 +130,30 @@ where
 {
     type Error = Error;
 
+    #[cfg(any(feature = "secp256k1", feature = "secp256k1-ffi"))]
+    fn try_from(extended_key: ExtendedKey) -> Result<ExtendedPublicKey<K>> {
+        if extended_key.prefix.is_public() {
+            Ok(ExtendedPublicKey {
+                public_key: PublicKey::from_bytes(extended_key.key_bytes)?,
+                attrs: extended_key.attrs.clone(),
+            })
+        } else if extended_key.prefix.is_private() {
+            #[cfg(feature = "secp256k1")]
+            let private_key = crate::XPrv::try_from(extended_key)?;
+            #[cfg(all(feature = "secp256k1-ffi", not(feature = "secp256k1")))]
+            let private_key =
+                ExtendedPrivateKey::<secp256k1_ffi::SecretKey>::try_from(extended_key)?;
+            let pubkey_bytes = private_key.public_key().to_bytes();
+            Ok(ExtendedPublicKey {
+                public_key: PublicKey::from_bytes(pubkey_bytes)?,
+                attrs: private_key.attrs().clone(),
+            })
+        } else {
+            Err(Error::Crypto)
+        }
+    }
+
+    #[cfg(not(any(feature = "secp256k1", feature = "secp256k1-ffi")))]
     fn try_from(extended_key: ExtendedKey) -> Result<ExtendedPublicKey<K>> {
         if extended_key.prefix.is_public() {
             Ok(ExtendedPublicKey {
@@ -138,5 +163,63 @@ where
         } else {
             Err(Error::Crypto)
         }
+    }
+}
+
+#[cfg(any(feature = "secp256k1", feature = "secp256k1-ffi"))]
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hex_literal::hex;
+
+    const CHAIN_CODE: [u8; 32] =
+        hex!("873DFF81C02F525623FD1FE5167EAC3A55A049DE3D314BB42EE227FFED37D508");
+    #[cfg(feature = "secp256k1")]
+    const XPUB_BASE58: &'static str = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhe\
+                                       PY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
+    const XPRV_BASE58: &'static str = "xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPP\
+                                       qjiChkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMPHi";
+    const PUB_KEY_BYTES: PublicKeyBytes =
+        hex!("0339A36013301597DAEF41FBE593A02CC513D0B55527EC2DF1050E2E8FF49C85C2");
+
+    #[cfg(feature = "secp256k1")]
+    #[test]
+    fn extendedpub_from_pub_xkey() {
+        let xkey: ExtendedKey = XPUB_BASE58.parse().unwrap();
+        let xpub = XPub::try_from(xkey).unwrap();
+
+        assert_eq!(xpub.attrs.depth, 0);
+        assert_eq!(xpub.attrs.parent_fingerprint, [0u8; 4]);
+        assert_eq!(xpub.attrs.child_number.0, 0);
+        assert_eq!(xpub.attrs.chain_code, CHAIN_CODE);
+        assert_eq!(xpub.to_bytes(), PUB_KEY_BYTES);
+    }
+
+    #[cfg(feature = "secp256k1")]
+    #[test]
+    fn extendedpub_from_priv_xkey() {
+        let xkey: ExtendedKey = XPRV_BASE58.parse().unwrap();
+        let xpub = XPub::try_from(xkey).unwrap();
+
+        assert_eq!(xpub.attrs.depth, 0);
+        assert_eq!(xpub.attrs.parent_fingerprint, [0u8; 4]);
+        assert_eq!(xpub.attrs.child_number.0, 0);
+        assert_eq!(xpub.attrs.chain_code, CHAIN_CODE);
+        assert_eq!(xpub.to_bytes(), PUB_KEY_BYTES);
+    }
+
+    #[cfg(feature = "secp256k1-ffi")]
+    #[test]
+    fn extendedpub_from_priv_xkey_secp() {
+        use secp256k1_ffi::PublicKey;
+
+        let xkey: ExtendedKey = XPRV_BASE58.parse().unwrap();
+        let xpub = ExtendedPublicKey::<PublicKey>::try_from(xkey).unwrap();
+
+        assert_eq!(xpub.attrs.depth, 0);
+        assert_eq!(xpub.attrs.parent_fingerprint, [0u8; 4]);
+        assert_eq!(xpub.attrs.child_number.0, 0);
+        assert_eq!(xpub.attrs.chain_code, CHAIN_CODE);
+        assert_eq!(xpub.to_bytes(), PUB_KEY_BYTES);
     }
 }

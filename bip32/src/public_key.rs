@@ -1,6 +1,9 @@
 //! Trait for deriving child keys on a given type.
 
-use crate::{KeyFingerprint, PrivateKeyBytes, Result, KEY_SIZE};
+use crate::{
+    ChainCode, ChildNumber, Error, HmacSha512, KeyFingerprint, PrivateKeyBytes, Result, KEY_SIZE,
+};
+use hmac::{KeyInit, Mac};
 use ripemd::Ripemd160;
 use sha2::{Digest, Sha256};
 
@@ -9,9 +12,6 @@ use {
     crate::XPub,
     k256::elliptic_curve::{group::prime::PrimeCurveAffine, sec1::ToEncodedPoint},
 };
-
-#[cfg(any(feature = "secp256k1", feature = "secp256k1-ffi"))]
-use crate::Error;
 
 /// Bytes which represent a public key.
 ///
@@ -33,13 +33,50 @@ pub trait PublicKey: Sized {
     ///
     /// Default implementation uses `RIPEMD160(SHA256(public_key))`.
     fn fingerprint(&self) -> KeyFingerprint {
-        let digest = Ripemd160::digest(&Sha256::digest(&self.to_bytes()));
+        let digest = Ripemd160::digest(Sha256::digest(self.to_bytes()));
         digest[..4].try_into().expect("digest truncated")
+    }
+
+    /// Derive a tweak value that can be used to generate the child key (see [`derive_child`]).
+    ///
+    /// The `chain_code` is either a newly initialized one,
+    /// or one obtained from the previous invocation of `derive_tweak()`
+    /// (for a multi-level derivation).
+    ///
+    /// **Warning:** make sure that if you are creating a new `chain_code`, you are doing so
+    /// in a cryptographically safe way.
+    /// Normally this would be done according to BIP-39 (within [`ExtendedPrivateKey::new`]).
+    ///
+    /// **Note:** `child_number` cannot be a hardened one (will result in an error).
+    fn derive_tweak(
+        &self,
+        chain_code: &ChainCode,
+        child_number: ChildNumber,
+    ) -> Result<(PrivateKeyBytes, ChainCode)> {
+        if child_number.is_hardened() {
+            // Cannot derive child public keys for hardened `ChildNumber`s
+            return Err(Error::ChildNumber);
+        }
+
+        let mut hmac = HmacSha512::new_from_slice(chain_code).map_err(|_| Error::Crypto)?;
+
+        hmac.update(&self.to_bytes());
+        hmac.update(&child_number.to_bytes());
+
+        let result = hmac.finalize().into_bytes();
+        let (tweak_bytes, chain_code_bytes) = result.split_at(KEY_SIZE);
+
+        // Note that at this point we are only asserting that `tweak_bytes` have the expected size.
+        // Checking if it actually fits the curve scalar happens in `derive_child()`.
+        let tweak = tweak_bytes.try_into()?;
+
+        let chain_code = chain_code_bytes.try_into()?;
+
+        Ok((tweak, chain_code))
     }
 }
 
 #[cfg(feature = "secp256k1")]
-#[cfg_attr(docsrs, doc(cfg(feature = "secp256k1")))]
 impl PublicKey for k256::PublicKey {
     fn from_bytes(bytes: PublicKeyBytes) -> Result<Self> {
         Ok(k256::PublicKey::from_sec1_bytes(&bytes)?)
@@ -63,14 +100,13 @@ impl PublicKey for k256::PublicKey {
 }
 
 #[cfg(feature = "secp256k1")]
-#[cfg_attr(docsrs, doc(cfg(feature = "secp256k1")))]
 impl PublicKey for k256::ecdsa::VerifyingKey {
     fn from_bytes(bytes: PublicKeyBytes) -> Result<Self> {
         Ok(k256::ecdsa::VerifyingKey::from_sec1_bytes(&bytes)?)
     }
 
     fn to_bytes(&self) -> PublicKeyBytes {
-        self.to_bytes()
+        k256::CompressedPoint::from(self)
             .as_slice()
             .try_into()
             .expect("malformed key")
@@ -84,7 +120,6 @@ impl PublicKey for k256::ecdsa::VerifyingKey {
 }
 
 #[cfg(feature = "secp256k1")]
-#[cfg_attr(docsrs, doc(cfg(feature = "secp256k1")))]
 impl From<XPub> for k256::ecdsa::VerifyingKey {
     fn from(xpub: XPub) -> k256::ecdsa::VerifyingKey {
         k256::ecdsa::VerifyingKey::from(&xpub)
@@ -92,7 +127,6 @@ impl From<XPub> for k256::ecdsa::VerifyingKey {
 }
 
 #[cfg(feature = "secp256k1")]
-#[cfg_attr(docsrs, doc(cfg(feature = "secp256k1")))]
 impl From<&XPub> for k256::ecdsa::VerifyingKey {
     fn from(xpub: &XPub) -> k256::ecdsa::VerifyingKey {
         *xpub.public_key()
@@ -100,7 +134,6 @@ impl From<&XPub> for k256::ecdsa::VerifyingKey {
 }
 
 #[cfg(feature = "secp256k1-ffi")]
-#[cfg_attr(docsrs, doc(cfg(feature = "secp256k1-ffi")))]
 impl PublicKey for secp256k1_ffi::PublicKey {
     fn from_bytes(bytes: PublicKeyBytes) -> Result<Self> {
         Ok(secp256k1_ffi::PublicKey::from_slice(&bytes)?)
@@ -110,16 +143,12 @@ impl PublicKey for secp256k1_ffi::PublicKey {
         self.serialize()
     }
 
-    fn derive_child(&self, other: PrivateKeyBytes) -> Result<Self> {
+    fn derive_child(&self, bytes: PrivateKeyBytes) -> Result<Self> {
         use secp256k1_ffi::{Secp256k1, VerifyOnly};
+
         let engine = Secp256k1::<VerifyOnly>::verification_only();
-
-        let mut child_key = *self;
-        child_key
-            .add_exp_assign(&engine, &other)
-            .map_err(|_| Error::Crypto)?;
-
-        Ok(child_key)
+        let scalar = secp256k1_ffi::Scalar::from_be_bytes(bytes)?;
+        Ok(self.add_exp_tweak(&engine, &scalar)?)
     }
 }
 

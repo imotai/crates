@@ -11,22 +11,18 @@ use crate::ed25519;
 pub enum Algorithm {
     /// ECDSA with NIST P-256.
     #[cfg(feature = "nistp256")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "nistp256")))]
     EcdsaNistP256,
 
     /// ECDSA with NIST P-384.
     #[cfg(feature = "nistp384")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "nistp384")))]
     EcdsaNistP384,
 
     /// ECDSA with secp256k1.
     #[cfg(feature = "secp256k1")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "secp256k1")))]
     EcdsaSecp256k1,
 
     /// Ed25519.
     #[cfg(feature = "ed25519")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "ed25519")))]
     Ed25519,
 }
 
@@ -53,11 +49,11 @@ impl Algorithm {
     }
 }
 
-impl TryFrom<pkcs8::AlgorithmIdentifier<'_>> for Algorithm {
+impl TryFrom<pkcs8::AlgorithmIdentifierRef<'_>> for Algorithm {
     type Error = Error;
 
     #[allow(unused_variables)]
-    fn try_from(pkcs8_alg_id: pkcs8::AlgorithmIdentifier<'_>) -> Result<Self> {
+    fn try_from(pkcs8_alg_id: pkcs8::AlgorithmIdentifierRef<'_>) -> Result<Self> {
         #[cfg(feature = "ecdsa")]
         if pkcs8_alg_id.oid == ecdsa::elliptic_curve::ALGORITHM_OID {
             #[cfg(any(feature = "nistp256", feature = "secp256k1"))]

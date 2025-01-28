@@ -86,7 +86,7 @@ impl Prefix {
         bytes[..4].copy_from_slice(&version.to_be_bytes());
 
         let mut buffer = [0u8; ExtendedKey::MAX_BASE58_SIZE];
-        bs58::encode(&bytes).with_check().into(buffer.as_mut())?;
+        bs58::encode(&bytes).with_check().onto(buffer.as_mut_slice())?;
 
         let s = str::from_utf8(&buffer[..4]).map_err(|_| Error::Base58)?;
         Self::validate_str(s)?;
@@ -128,7 +128,7 @@ impl Prefix {
         let mut i = 0;
 
         while i < Self::LENGTH {
-            if matches!(s.as_bytes()[i], b'a'..=b'z' | b'A'..=b'Z') {
+            if s.as_bytes()[i].is_ascii_alphabetic() {
                 i += 1;
             } else {
                 return Err(Error::Decode);
